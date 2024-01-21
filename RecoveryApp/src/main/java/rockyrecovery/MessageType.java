@@ -5,8 +5,8 @@ public class MessageType {
 	// Message Type Constants.
 	public static final int MSG_T_NACK = -1;
 	public static final int MSG_T_ACK = 0;
-	public static final int MSG_T_REGISTER_DEVMGR = 1;
-	public static final int MSG_T_REGISTER_CLIENT = 2;
+	public static final int MSG_T_REGISTER_ENDPOINT = 1;
+	public static final int MSG_T_RECOVERY_NO_CLOUD_FAILURE = 2;
 	public static final int MSG_T_GET_CMD = 3;
 	public static final int MSG_T_SEND_CMD = 4;
 	
