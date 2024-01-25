@@ -36,7 +36,9 @@ bin/
 lib/
 *~
 .gradle
-
+localBlockSnapshotStoreTable/
+versionMapTable/
+localEpochBitmapsTable/
 
 
 

@@ -1,5 +1,7 @@
 package rockyrecovery;
 
+import rocky.ctrl.utils.Timestamper;
+
 public class DebugLog {
 	public static boolean VERBOSE = true;
 	public static boolean DEBUG = true;
