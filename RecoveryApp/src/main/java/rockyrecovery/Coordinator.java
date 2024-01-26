@@ -11,6 +11,13 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import org.fusesource.leveldbjni.internal.NativeDB.DBException;
 
+import com.apple.foundationdb.Database;
+import com.apple.foundationdb.FDB;
+import com.google.common.base.Charsets;
+
+import rocky.ctrl.FDBArray;
+import rocky.ctrl.NBD;
+import rocky.ctrl.RockyStorage;
 import rocky.ctrl.ValueStorageLevelDB;
 import rocky.ctrl.cloud.GenericKeyValueStore;
 import rocky.ctrl.cloud.ValueStorageDynamoDB;
@@ -19,10 +26,12 @@ import rocky.ctrl.utils.ByteUtils;
 
 public class Coordinator {
 
-	// storage type related
+	// storage related
 	public enum BackendStorageType {DynamoDBLocal, DynamoDB_SEOUL, 
 		DynamoDB_LONDON, DynamoDB_OHIO, Unknown};
 	public static BackendStorageType backendStorage;
+	public static String exportName;
+	public static String rockyLocalStoragePath;
 	
 	// connection related
 	private static String myIP;
@@ -40,12 +49,12 @@ public class Coordinator {
 	public static boolean debugPrintoutFlag;
 	
 	// metadata related (local and cloud)
-	// public String final pBmTableName = "presenceBitmapTable";
-	public static final String cloudEpochBitmapsTableName = "cloudEpochBitmapsTable";
-	public static final String localEpochBitmapsTableName = "localEpochBitmapsTable";
-	public static final String cloudBlockSnapshotStoreTableName = "cloudBlockSnapshotStoreTable";
-	public static final String versionMapTableName = "versionMapTable";
-	public static final String localBlockSnapshotStoreTableName = "localBlockSnapshotStoreTable";
+	// public String pBmTableName = "presenceBitmapTable";
+	public static String cloudEpochBitmapsTableName;
+	public static String localEpochBitmapsTableName;
+	public static String cloudBlockSnapshotStoreTableName;
+	public static String versionMapTableName;
+	public static String localBlockSnapshotStoreTableName;
 
 	// public GenericKeyValueStore pBmStore;
 	public static GenericKeyValueStore cloudEpochBitmaps;
@@ -109,6 +118,11 @@ public class Coordinator {
 	 */
 	public Coordinator(String coordinatorName) {
 		loggerID = "Coordinator" + coordinatorName;
+		cloudEpochBitmapsTableName = exportName + "-cloudEpochBitmapsTable";
+		localEpochBitmapsTableName = rockyLocalStoragePath + "/" + exportName + "-localEpochBitmapsTable";
+		cloudBlockSnapshotStoreTableName = exportName + "-cloudBlockSnapshotStoreTable";
+		versionMapTableName = rockyLocalStoragePath + "/" + exportName + "-versionMapTable";
+		localBlockSnapshotStoreTableName = rockyLocalStoragePath + "/" + exportName + "-localBlockSnapshotStoreTable";
 		
 		if (Coordinator.backendStorage.equals(Coordinator.BackendStorageType.DynamoDBLocal)) {
 			//pBmStore = new ValueStorageDynamoDB(pBmTableName, true);
@@ -261,11 +275,26 @@ public class Coordinator {
 		System.out.println("startNoCloudFailureRecoveryWorker entered");
 		ncfrWorker = new NoCloudFailureRecoveryWorker();
 		noCloudFailureRecoveryWorkerThread = new Thread(ncfrWorker);
+		noCloudFailureRecoveryWorkerIsAliveFlag = true;
 		noCloudFailureRecoveryWorkerThread.start();
 	}
 	
+	public void waitNoCloudFailureRecoveryWorker() {
+		System.out.println("waiting for the NoCloudFailureRecoveryWorker thread to terminate");
+		while (noCloudFailureRecoveryWorkerIsAliveFlag) {
+			try {
+				//System.out.println("noCloudFailureRecoveryWorker thread is still alive. Wait for 30sec and retry.");
+				noCloudFailureRecoveryWorkerThread.join(30000);
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+		System.out.println("noCloudFailureRecoveryWorker thread is now terminated. Waiting is over.");
+	}
+	
 	public void stopNoCloudFailureRecoveryWorker() {
-		System.out.println("interrupting the role switcher thread to terminate");
+		System.out.println("interrupting the NoCloudFailureRecoveryWorker thread to terminate");
 		noCloudFailureRecoveryWorkerThread.interrupt();
 		try {
 			noCloudFailureRecoveryWorkerThread.join();
@@ -274,9 +303,9 @@ public class Coordinator {
 			e.printStackTrace();
 		}
 	}
-	
+	static boolean noCloudFailureRecoveryWorkerIsAliveFlag;
 	public class NoCloudFailureRecoveryWorker implements Runnable {
-		public NoCloudFailureRecoveryWorker() { 
+		public NoCloudFailureRecoveryWorker() {
 		}
 		@Override
 		public void run() {
@@ -294,11 +323,14 @@ public class Coordinator {
 			}
 			Coordinator.rollbackLocalNode();
 			Coordinator.rollbackCloudNode();
+			noCloudFailureRecoveryWorkerIsAliveFlag = false;
 			DebugLog.log("[NoCloudFailureRecoveryWorker] Terminating NoCloudFailureRecoveryWorker Thread");
 		}
 	}
-	
+	static BitSet localBlockResetBitmap;
+	static ValueStorageLevelDB localBlockResetEpochAndBlockIDPairStore;
 	protected static void resetVersionMap(long beginEpoch, long endEpoch) {
+		System.out.println("resetVersionMap beginEpoch=" + beginEpoch + " endEpoch=" + endEpoch);
 		byte[] epochBitmap = null;
 		for (long i = beginEpoch; i <= endEpoch; i++) {
 			if (debugPrintoutFlag) {
@@ -314,6 +346,16 @@ public class Coordinator {
 					if (debugPrintoutFlag) {
 						DebugLog.log("epochBitmap is received for epoch=" + i);
 					}
+					if (localBlockResetBitmap == null) {
+						localBlockResetBitmap = new BitSet(epochBitmap.length);
+						try {
+							localBlockResetEpochAndBlockIDPairStore = new ValueStorageLevelDB(exportName + "-localBlockResetEpochAndBlockIDPairStoreTable");
+							localBlockResetEpochAndBlockIDPairStore.clean(); // clean the effect from the previous run 
+						} catch (Exception e) {
+							// TODO Auto-generated catch block
+							e.printStackTrace();
+						}
+					}
 					BitSet epochBitmapBitSet = BitSet.valueOf(epochBitmap);
 					localEpochBitmaps.put(i + "-bitmap", epochBitmap);
 					byte[] thisEpochBytes = ByteUtils.longToBytes(i);
@@ -326,6 +368,8 @@ public class Coordinator {
 					    	break; // or (i+1) would overflow
 					    }
 					    versionMap.put(j + "", thisEpochBytes);
+					    localBlockResetBitmap.set(j);
+					    localBlockResetEpochAndBlockIDPairStore.put(j + "", (i + ":" + j).getBytes());
 					}
 					if (debugPrintoutFlag) {
 						DebugLog.log("finished with updating versionMap for epoch=" + i);
@@ -336,6 +380,36 @@ public class Coordinator {
 				e.printStackTrace();
 			}
 		}
+		System.out.println("resetVersionMap is done");
+	}
+	
+	protected static void resetRockyStorageFromEBSS(long beginEpoch, long endEpoch) {
+		System.out.println("resetRockyStorageFromEBSS entered");
+		byte[] resetValue;
+		byte[] epochAndBlockIDPairBytes;
+		String epochAndBlockIDPairStr;
+		Database db = FDB.selectAPIVersion(510).open();
+		System.out.println("FDBArray opened");
+		FDBArray fdbArray = FDBArray.open(db, exportName);
+		for (int i = localBlockResetBitmap.nextSetBit(0); i >= 0; i = localBlockResetBitmap.nextSetBit(i+1)) {
+			System.out.println("block ID=" + i + " needs to be updated");
+			epochAndBlockIDPairBytes = localBlockResetEpochAndBlockIDPairStore.get(i + "");
+			epochAndBlockIDPairStr = new String(epochAndBlockIDPairBytes, Charsets.UTF_8);
+			System.out.println("epochAndBlockIDPairStr=" + epochAndBlockIDPairStr);
+			try {
+				resetValue = localBlockSnapshotStore.get(epochAndBlockIDPairStr);
+				System.out.println("resetValue String=" + new String(resetValue, Charsets.UTF_8));
+				fdbArray.write(resetValue, i * RockyStorage.blockSize);
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+		System.out.println("resetRockyStorageFromEBSS is done");
+	}
+	
+	protected static void resetRockyStorageFromCBSS(long beginEpoch, long endEpoch) {
+		// TBD: fetch required blocks from CBSS and store it into the rocky storage (i.e. FDBArray).
 	}
 	
 	protected static void rollbackLocalNode() {
@@ -343,10 +417,15 @@ public class Coordinator {
 		if (epochEp < epochEa) {
 			DebugLog.log("epochEp < epochEa: Need to rollback the local state to e_p");
 			resetVersionMap(1, epochEa - 1);
+			resetRockyStorageFromEBSS(1, epochEp);
+			resetRockyStorageFromCBSS(epochEp + 1, epochEa - 1);
 		} else { // epochEp >= epochEa
 			DebugLog.log("epochEp >= epochEa: Need to rollback the local state to e_a - 1");
 			epochEp = epochEa - 1;
+			System.out.println("resetVersionMap is called");
 			resetVersionMap(1, epochEp);
+			System.out.println("resetRockyStorageFromEBSS is called");
+			resetRockyStorageFromEBSS(1, epochEp);
 		}
 		//TODO: presence bitmap should be reset to 1 for all bits here
 		
@@ -426,7 +505,13 @@ public class Coordinator {
 						System.err.println("Error: Cannot support Unknown backendStorageType");
 						System.exit(1);
 					}
-				}
+				} else if (line.startsWith("exportName")) {
+					String[] tokens = line.split("=");
+					exportName = tokens[1];
+				} else if (line.startsWith("rockyLocalStoragePath")) {
+					String[] tokens = line.split("=");
+					rockyLocalStoragePath = tokens[1];
+				} 
 			}
 		} catch (FileNotFoundException e) {
 			e.printStackTrace();
@@ -497,6 +582,7 @@ public class Coordinator {
 		DebugLog.log("recoveryCommittee=" + recoveryCommittee.toString());
 		DebugLog.log("backendStorage=" + backendStorage);
 		DebugLog.log("myInstanceNo=" + myInstanceNo);
+		DebugLog.log("exportName=" + exportName);
 	}
 	
 	public static void initialize() {
@@ -515,6 +601,7 @@ public class Coordinator {
 		recoveryCommittee = new ArrayList<String>();
 		backendStorage = BackendStorageType.DynamoDBLocal;
 		myInstanceNo = 0;
+		exportName = "testingRecovery";
 		System.out.println("Initialization of variables is done.");	
 	}
 	

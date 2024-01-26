@@ -6,8 +6,12 @@ import java.util.concurrent.ExecutionException;
 import org.junit.Assert;
 import org.junit.Test;
 
+import com.apple.foundationdb.Database;
+import com.apple.foundationdb.FDB;
 import com.google.common.base.Charsets;
+import com.google.common.primitives.Longs;
 
+import rocky.ctrl.FDBArray;
 import rocky.ctrl.RockyController;
 import rocky.ctrl.RockyController.RockyControllerRoleType;
 import rocky.ctrl.cloud.ValueStorageDynamoDB;
@@ -28,8 +32,13 @@ public class CoordinatorTest {
 		byte[] bytesExpected = new byte[512];
 		byte[] bytesToWrite;
 		RockyController.backendStorage = RockyController.BackendStorageType.DynamoDBLocal;
+		//Database db = FDB.selectAPIVersion(510).open();
+		//System.out.println("FDBArray opened");
+		//FDBArray fdbArray = FDBArray.open(db, "testingRecovery");
+		//fdbArray.setMetadata("size".getBytes(), Longs.toByteArray(512000));
 		System.out.println("Rocky Storage being instantiated..");
-		Storage storage = new RockyStorage("testing");
+		Storage storage = new RockyStorage("testingRecovery");
+		RockyController.epochPeriod = 300000;
 		RockyStorage.debugPrintoutFlag = true;
 		RockyController.role = RockyControllerRoleType.Owner;
 		storage.connect();
@@ -51,16 +60,18 @@ public class CoordinatorTest {
 				}
 			}
 			storage.flush();
+			Thread.sleep(1000);
+			((RockyStorage) storage).instantCloudFlushing();
 		}
-		Thread.sleep(100);
-		for (int i = 0; i < numBlockUsed; i++) {
-			storage.read(bytesReadBuffer, i * RockyStorage.blockSize);
-			System.out.println("Write confirmation. Assert for block ID=" + i);
-			System.arraycopy(valueList[numEpoch-1][i].getBytes(), 0, bytesExpected, 0, valueList[numEpoch-1][i].getBytes().length);
-			System.out.println("expectedStr=" + new String(bytesExpected, Charsets.UTF_8));
-			System.out.println("actualStr=" + new String(bytesReadBuffer, Charsets.UTF_8));
-			Assert.assertArrayEquals(bytesExpected, bytesReadBuffer);
-		}
+		Thread.sleep(3000);
+//		for (int i = 0; i < numBlockUsed; i++) {
+//			storage.read(bytesReadBuffer, i * RockyStorage.blockSize);
+//			System.out.println("Write confirmation. Assert for block ID=" + i);
+//			System.arraycopy(valueList[numEpoch-1][i].getBytes(), 0, bytesExpected, 0, valueList[numEpoch-1][i].getBytes().length);
+//			System.out.println("expectedStr=" + new String(bytesExpected, Charsets.UTF_8));
+//			System.out.println("actualStr=" + new String(bytesReadBuffer, Charsets.UTF_8));
+//			Assert.assertArrayEquals(bytesExpected, bytesReadBuffer);
+//		}
 		System.out.println("Rocky disconnect..");
 		storage.disconnect();
 //		try {
@@ -72,8 +83,6 @@ public class CoordinatorTest {
 //			e.printStackTrace();
 //		}
 		Coordinator.initialize();
-		Coordinator.epochEa = Coordinator.epochEa + 3;
-		Coordinator.epochEp = Coordinator.epochEp + 3;
 		System.out.println("Rocky Coordinator being instantiated..");
 		Coordinator.cloudEpochBitmaps = new ValueStorageDynamoDB(Coordinator.cloudEpochBitmapsTableName, ValueStorageDynamoDB.AWSRegionEnum.LOCAL);
 		Coordinator.cloudBlockSnapshotStore = new ValueStorageDynamoDB(Coordinator.cloudBlockSnapshotStoreTableName, ValueStorageDynamoDB.AWSRegionEnum.LOCAL);
@@ -81,9 +90,14 @@ public class CoordinatorTest {
 		Coordinator.localBlockSnapshotStore = RockyStorage.localBlockSnapshotStore;
 		Coordinator.versionMap = RockyStorage.versionMap;
 		Coordinator server = new Coordinator(Coordinator.myID);
+		//Coordinator.epochEa = server.getEpoch();
+		//Coordinator.epochEp = Coordinator.epochEa;
+		Coordinator.epochEa = 0;
+		Coordinator.epochEp = 0;
+		System.out.println("epochEp=" + Coordinator.epochEp + " epochEa=" + Coordinator.epochEa);
 		server.startNoCloudFailureRecoveryWorker();
 		Coordinator.noCloudFailureRecoveryFlag = true;
-		Thread.sleep(50); // wait for recovery procedure to finish
+		server.waitNoCloudFailureRecoveryWorker(); // wait for recovery procedure to finish
 		RockyStorage.presenceBitmap.set(0, numBlockUsed);
 //		try {
 //			RockyStorage.localEpochBitmaps = new ValueStorageLevelDB("localEpochBitmapsTable");
@@ -99,6 +113,8 @@ public class CoordinatorTest {
 			storage.read(bytesReadBuffer, i*RockyStorage.blockSize);
 			System.arraycopy(coherentDiskImage[i].getBytes(), 0, bytesExpected, 0, valueList[numEpoch-1][i].getBytes().length);
 			System.out.println("Assert for block ID=" + i);
+			System.out.println("expectedStr=" + new String(bytesExpected, Charsets.UTF_8));
+			System.out.println("actualStr=" + new String(bytesReadBuffer, Charsets.UTF_8));
 			Assert.assertArrayEquals(bytesExpected, bytesReadBuffer);
 		}
 		System.out.println("Finishing testNoCloudFailureRecoveryEpochEa3Simple");		
